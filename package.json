@@ -1,0 +1,19 @@
+{
+  "name": "knitting-machine-downtime-manager",
+  "version": "1.0.0",
+  "description": "Circular Knitting Factory - Machine Downtime Manager (Android app via Capacitor)",
+  "private": true,
+  "scripts": {
+    "build": "node scripts/build.js",
+    "cap:sync": "npx cap sync android",
+    "cap:add:android": "npx cap add android",
+    "android:assemble": "cd android && ./gradlew assembleDebug --no-daemon"
+  },
+  "dependencies": {
+    "@capacitor/android": "^6.2.0",
+    "@capacitor/core": "^6.2.0"
+  },
+  "devDependencies": {
+    "@capacitor/cli": "^6.2.0"
+  }
+}

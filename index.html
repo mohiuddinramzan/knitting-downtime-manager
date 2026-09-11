@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+<meta name="theme-color" content="#111827" />
+<title>Knitting Downtime Manager</title>
+<link rel="stylesheet" href="src/css/styles.css" />
+</head>
+<body>
+  <div id="offline-banner" class="offline-banner hidden">📡 No connection — actions are queued and will sync automatically.</div>
+
+  <header id="topbar" class="topbar hidden">
+    <button id="btn-back" class="icon-btn hidden" aria-label="Back">←</button>
+    <div class="topbar-title" id="topbar-title">Knitting Floor</div>
+    <div class="topbar-user" id="topbar-user"></div>
+  </header>
+
+  <main id="app" class="app"></main>
+
+  <nav id="bottomnav" class="bottomnav hidden">
+    <button data-route="#/dashboard" class="nav-btn"><span class="nav-icon">🏭</span><span>Floor</span></button>
+    <button data-route="#/machines" class="nav-btn"><span class="nav-icon">📋</span><span>Machines</span></button>
+    <button data-route="#/scan" class="nav-btn"><span class="nav-icon">📷</span><span>Scan</span></button>
+    <button data-route="#/reports" class="nav-btn"><span class="nav-icon">📊</span><span>Reports</span></button>
+    <button data-route="#/more" class="nav-btn"><span class="nav-icon">☰</span><span>More</span></button>
+  </nav>
+
+  <div id="modal-root"></div>
+
+  <!-- jsQR: pure-JS QR decoder used for the in-app camera scanner (no paid/native plugin required) -->
+  <script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js"></script>
+
+  <script src="src/js/categories.js"></script>
+  <script src="src/js/seed-data.js"></script>
+  <script src="src/js/db.js"></script>
+  <script src="src/js/ui-helpers.js"></script>
+  <script src="src/screens/login.js"></script>
+  <script src="src/screens/dashboard.js"></script>
+  <script src="src/screens/machine-list.js"></script>
+  <script src="src/screens/machine-detail.js"></script>
+  <script src="src/screens/report-problem.js"></script>
+  <script src="src/screens/resolve.js"></script>
+  <script src="src/screens/scan.js"></script>
+  <script src="src/screens/reports.js"></script>
+  <script src="src/screens/audit.js"></script>
+  <script src="src/screens/admin.js"></script>
+  <script src="src/screens/more.js"></script>
+  <script src="src/js/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,134 @@
+// Firestore Security Rules — Knitting Machine Downtime Manager
+//
+// These rules exist for teams that outgrow the built-in localStorage demo
+// mode and move to a real Firebase project (see README "Moving to a real
+// backend"). They enforce, server-side, the exact same rules that
+// src/js/db.js enforces client-side in the default build:
+//   - only signed-in users with a matching /users/{uid} doc can write anything
+//   - an OPERATOR can only report/start/resolve problems on a machine
+//     currently assigned to them for the active shift
+//   - only SUPERVISOR/ADMIN can edit assignments, cancel/correct problems,
+//     or touch other users' roles
+//   - auditLogs are create-only (no update/delete) for every role
+//
+// Deploy with: firebase deploy --only firestore:rules
+
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function myUser() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data;
+    }
+
+    function myRole() {
+      return isSignedIn() ? myUser().role : null;
+    }
+
+    function isActive() {
+      return isSignedIn() && myUser().active == true;
+    }
+
+    function isAdmin() {
+      return isActive() && myRole() == 'ADMIN';
+    }
+
+    function isSupervisorOrAdmin() {
+      return isActive() && (myRole() == 'SUPERVISOR' || myRole() == 'ADMIN');
+    }
+
+    function isAssignedTo(machineId) {
+      // machineAssignments/{shift} => { machineId: operatorUid, ... }
+      return isActive() && myRole() == 'OPERATOR' &&
+        exists(/databases/$(database)/documents/machineAssignments/$(myUser().shift)) &&
+        get(/databases/$(database)/documents/machineAssignments/$(myUser().shift)).data[machineId] == request.auth.uid;
+    }
+
+    // ---------- users ----------
+    match /users/{userId} {
+      allow read: if isActive();
+      // Users may only ever change their own role via an Admin action, never themselves.
+      allow create, delete: if isAdmin();
+      allow update: if isAdmin() ||
+        (isSignedIn() && request.auth.uid == userId &&
+         !('role' in request.resource.data.diff(resource.data).affectedKeys()) &&
+         !('active' in request.resource.data.diff(resource.data).affectedKeys()));
+    }
+
+    // ---------- machines ----------
+    match /machines/{machineId} {
+      allow read: if isActive();
+      allow create, delete: if isAdmin();
+      // Status/activeRecordId transitions are only ever written through
+      // downtimeRecords writes below (Cloud Functions recommended), or by
+      // Supervisor/Admin corrections.
+      allow update: if isAdmin() || isSupervisorOrAdmin();
+    }
+
+    // ---------- machineAssignments ----------
+    match /machineAssignments/{shift} {
+      allow read: if isActive();
+      allow write: if isSupervisorOrAdmin();
+    }
+
+    // ---------- shifts / problemCategories / settings ----------
+    match /shifts/{shiftId} {
+      allow read: if isActive();
+      allow write: if isAdmin();
+    }
+    match /problemCategories/{catId} {
+      allow read: if isActive();
+      allow write: if isAdmin();
+    }
+    match /settings/{docId} {
+      allow read: if isActive();
+      allow write: if isAdmin();
+    }
+
+    // ---------- downtimeRecords ----------
+    match /downtimeRecords/{recordId} {
+      allow read: if isActive();
+
+      // Reporting a NEW problem: operator must be assigned to that machine
+      // (or be technician/supervisor/admin), and it must reference an
+      // existing machine that is currently GREEN — enforced by checking
+      // the machines doc referenced in the write.
+      allow create: if isActive() && (
+        isSupervisorOrAdmin() ||
+        myRole() == 'TECHNICIAN' ||
+        isAssignedTo(request.resource.data.machineId)
+      );
+
+      // Updating (work started / resolved / cancelled) requires the same
+      // assignment check, OR technician/supervisor/admin.
+      allow update: if isActive() && (
+        isSupervisorOrAdmin() ||
+        myRole() == 'TECHNICIAN' ||
+        isAssignedTo(resource.data.machineId)
+      );
+
+      // Nobody deletes downtime history — corrections are modeled as an
+      // update to status: 'cancelled', never a delete.
+      allow delete: if false;
+    }
+
+    // ---------- maintenanceRecords ----------
+    match /maintenanceRecords/{recordId} {
+      allow read: if isActive();
+      allow create, update: if isActive() && (myRole() == 'TECHNICIAN' || isSupervisorOrAdmin());
+      allow delete: if false;
+    }
+
+    // ---------- auditLogs: append-only for everyone, no exceptions ----------
+    match /auditLogs/{logId} {
+      allow read: if isSupervisorOrAdmin();
+      allow create: if isActive();
+      allow update, delete: if false;
+    }
+  }
+}

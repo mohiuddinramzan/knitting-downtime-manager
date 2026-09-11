@@ -1,0 +1,410 @@
+/**
+ * db.js — data + authorization layer.
+ *
+ * IMPORTANT (see README "Security model"):
+ * This default build stores data in the browser's localStorage so the app
+ * is fully usable out of the box with zero paid services and zero setup.
+ * Every mutating action (report/startWork/resolve/assign/admin edits) is
+ * routed through the functions below and re-checks the user's role and
+ * machine assignment *here*, not just in the UI — so screens cannot be
+ * bypassed by editing the DOM or calling a function directly from devtools
+ * with the wrong user loaded.
+ *
+ * For a real multi-device factory deployment, replace the bodies of the
+ * functions in this file with calls to Firestore (or any backend) and
+ * enforce the exact same checks server-side using security rules —
+ * see /firestore.rules for a ready-to-use example that mirrors this logic.
+ */
+(function (global) {
+  const LS_KEYS = {
+    users: 'kdm_users',
+    machines: 'kdm_machines',
+    assignments: 'kdm_assignments',
+    categories: 'kdm_categories',
+    records: 'kdm_downtimeRecords',
+    audit: 'kdm_auditLogs',
+    session: 'kdm_session',
+    settings: 'kdm_settings'
+  };
+
+  function read(key, fallback) {
+    try {
+      const raw = localStorage.getItem(key);
+      return raw ? JSON.parse(raw) : fallback;
+    } catch (e) {
+      console.error('DB read error', key, e);
+      return fallback;
+    }
+  }
+  function write(key, value) {
+    localStorage.setItem(key, JSON.stringify(value));
+  }
+  function uid(prefix) {
+    return prefix + '_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 8);
+  }
+  function nowIso() { return new Date().toISOString(); }
+
+  class AuthError extends Error {
+    constructor(message, userMessage) {
+      super(message);
+      this.name = 'AuthError';
+      this.userMessage = userMessage || 'Not Authorized';
+    }
+  }
+
+  function init() {
+    if (!read(LS_KEYS.users, null)) write(LS_KEYS.users, global.KDM_SEED.users);
+    if (!read(LS_KEYS.machines, null)) write(LS_KEYS.machines, global.KDM_SEED.machines);
+    if (!read(LS_KEYS.assignments, null)) write(LS_KEYS.assignments, global.KDM_SEED.assignments);
+    if (!read(LS_KEYS.categories, null)) write(LS_KEYS.categories, global.KDM_CATEGORIES);
+    if (!read(LS_KEYS.records, null)) write(LS_KEYS.records, []);
+    if (!read(LS_KEYS.audit, null)) write(LS_KEYS.audit, []);
+    if (!read(LS_KEYS.settings, null)) write(LS_KEYS.settings, { factoryName: 'Knitting Floor' });
+  }
+
+  // ---------- Audit ----------
+  function logAudit(user, machineId, action, details) {
+    const logs = read(LS_KEYS.audit, []);
+    logs.unshift({
+      id: uid('log'),
+      timestamp: nowIso(),
+      userId: user ? user.id : 'SYSTEM',
+      userName: user ? user.name : 'System',
+      machineId: machineId || null,
+      action,
+      details: details || ''
+    });
+    write(LS_KEYS.audit, logs);
+  }
+  function getAuditLogs() { return read(LS_KEYS.audit, []); }
+
+  // ---------- Auth ----------
+  function login(userId, pin) {
+    const users = read(LS_KEYS.users, []);
+    const user = users.find(u => u.id.toLowerCase() === String(userId).toLowerCase());
+    if (!user || !user.active) {
+      logAudit(null, null, 'LOGIN_FAILED', `Unknown or disabled user id: ${userId}`);
+      throw new AuthError('unknown_user', 'Invalid ID or PIN.');
+    }
+    if (String(user.pin) !== String(pin)) {
+      logAudit(user, null, 'LOGIN_FAILED', 'Wrong PIN');
+      throw new AuthError('wrong_pin', 'Invalid ID or PIN.');
+    }
+    write(LS_KEYS.session, { userId: user.id, loginAt: nowIso() });
+    logAudit(user, null, 'LOGIN', '');
+    return user;
+  }
+  function logout() {
+    const u = getCurrentUser();
+    write(LS_KEYS.session, null);
+    if (u) logAudit(u, null, 'LOGOUT', '');
+  }
+  function getCurrentUser() {
+    const session = read(LS_KEYS.session, null);
+    if (!session) return null;
+    const users = read(LS_KEYS.users, []);
+    return users.find(u => u.id === session.userId) || null;
+  }
+
+  // ---------- Users ----------
+  function listUsers() { return read(LS_KEYS.users, []); }
+  function requireAdmin(actor) {
+    if (!actor || actor.role !== 'ADMIN') throw new AuthError('not_admin', 'Only Admin can do this.');
+  }
+  function addUser(actor, userData) {
+    requireAdmin(actor);
+    const users = listUsers();
+    if (users.find(u => u.id === userData.id)) throw new AuthError('dup', 'User ID already exists.');
+    users.push(Object.assign({ active: true }, userData));
+    write(LS_KEYS.users, users);
+    logAudit(actor, null, 'USER_ADDED', `${userData.id} (${userData.role})`);
+  }
+  function updateUser(actor, userId, patch) {
+    requireAdmin(actor);
+    const users = listUsers();
+    const idx = users.findIndex(u => u.id === userId);
+    if (idx === -1) throw new AuthError('missing', 'User not found.');
+    // Role changes are admin-only and always audited explicitly.
+    if (patch.role && patch.role !== users[idx].role) {
+      logAudit(actor, null, 'ROLE_CHANGED', `${userId}: ${users[idx].role} -> ${patch.role}`);
+    }
+    users[idx] = Object.assign({}, users[idx], patch);
+    write(LS_KEYS.users, users);
+    logAudit(actor, null, 'USER_UPDATED', userId);
+  }
+  function setUserActive(actor, userId, active) {
+    requireAdmin(actor);
+    updateUserRaw(userId, { active });
+    logAudit(actor, null, active ? 'USER_ENABLED' : 'USER_DISABLED', userId);
+  }
+  function updateUserRaw(userId, patch) {
+    const users = listUsers();
+    const idx = users.findIndex(u => u.id === userId);
+    if (idx !== -1) { users[idx] = Object.assign({}, users[idx], patch); write(LS_KEYS.users, users); }
+  }
+
+  // ---------- Machines ----------
+  function listMachines() { return read(LS_KEYS.machines, []); }
+  function getMachine(machineId) { return listMachines().find(m => m.id === machineId) || null; }
+  function saveMachine(machine) {
+    const machines = listMachines();
+    const idx = machines.findIndex(m => m.id === machine.id);
+    if (idx === -1) machines.push(machine); else machines[idx] = machine;
+    write(LS_KEYS.machines, machines);
+  }
+  function addMachine(actor, data) {
+    requireAdmin(actor);
+    if (getMachine(data.id)) throw new AuthError('dup', 'Machine ID already exists.');
+    saveMachine(Object.assign({ status: 'GREEN' }, data));
+    logAudit(actor, data.id, 'MACHINE_ADDED', data.id);
+  }
+  function editMachine(actor, machineId, patch) {
+    requireAdmin(actor);
+    const m = getMachine(machineId);
+    if (!m) throw new AuthError('missing', 'Machine not found.');
+    saveMachine(Object.assign({}, m, patch));
+    logAudit(actor, machineId, 'MACHINE_EDITED', JSON.stringify(patch));
+  }
+  function deactivateMachine(actor, machineId) {
+    requireAdmin(actor);
+    editMachine(actor, machineId, { active: false });
+    logAudit(actor, machineId, 'MACHINE_DEACTIVATED', '');
+  }
+
+  // ---------- Assignments (Machine -> Operator, per shift) ----------
+  function getAssignments() { return read(LS_KEYS.assignments, {}); }
+  function getAssignedOperator(machineId, shift) {
+    const a = getAssignments();
+    return (a[shift] && a[shift][machineId]) || null;
+  }
+  function getCurrentAssignedOperator(machineId) {
+    // "Current" = look across shifts for now; a real deployment would key
+    // this off the active shift clock. We fall back to searching all shifts.
+    const a = getAssignments();
+    for (const shift of Object.keys(a)) {
+      if (a[shift][machineId]) return { operatorId: a[shift][machineId], shift };
+    }
+    return null;
+  }
+  function assignOperator(actor, shift, machineId, operatorId) {
+    if (!actor || !['ADMIN', 'SUPERVISOR'].includes(actor.role)) {
+      throw new AuthError('not_authorized', 'Only Supervisor/Admin can assign operators.');
+    }
+    const a = getAssignments();
+    if (!a[shift]) a[shift] = {};
+    a[shift][machineId] = operatorId;
+    write(LS_KEYS.assignments, a);
+    logAudit(actor, machineId, 'OPERATOR_ASSIGNED', `${operatorId} -> ${machineId} (${shift})`);
+  }
+
+  // Central authorization check used by every machine action below.
+  function assertCanOperate(actor, machineId, action) {
+    if (!actor) throw new AuthError('no_session', 'Please log in.');
+    if (['ADMIN', 'SUPERVISOR'].includes(actor.role)) return; // full access
+    if (actor.role === 'TECHNICIAN') {
+      // Technicians work on machines that already have an active problem
+      // (START_WORK / RESOLVE), not on reporting new ones.
+      if (action === 'REPORT_PROBLEM') {
+        throw new AuthError('tech_cannot_report', 'Technicians work on reported problems; ask the operator to report it.');
+      }
+      return;
+    }
+    if (actor.role === 'OPERATOR') {
+      const current = getCurrentAssignedOperator(machineId);
+      const assignedToMe = current && current.operatorId === actor.id;
+      if (!assignedToMe) {
+        throw new AuthError(
+          'not_assigned',
+          'This machine is assigned to another operator.'
+        );
+      }
+      return;
+    }
+    throw new AuthError('unknown_role', 'Not Authorized');
+  }
+
+  // ---------- Downtime records / status workflow ----------
+  function listRecords() { return read(LS_KEYS.records, []); }
+  function saveRecords(recs) { write(LS_KEYS.records, recs); }
+  function getActiveRecordForMachine(machineId) {
+    return listRecords().find(r => r.machineId === machineId && r.status === 'active') || null;
+  }
+
+  function reportProblem(actor, machineId, categoryId, problemType) {
+    assertCanOperate(actor, machineId, 'REPORT_PROBLEM');
+    const machine = getMachine(machineId);
+    if (!machine) throw new AuthError('missing_machine', 'Machine not found.');
+    if (machine.status !== 'GREEN') {
+      throw new AuthError('bad_transition', 'This machine already has an open problem.');
+    }
+    const record = {
+      id: uid('rec'),
+      machineId,
+      reportedBy: actor.name,
+      operatorId: actor.id,
+      problemCategory: categoryId,
+      problemType,
+      reportedAt: nowIso(),
+      workStartedAt: null,
+      workStartedBy: null,
+      resolvedAt: null,
+      resolvedBy: null,
+      downtimeMinutes: null,
+      status: 'active',
+      resolution: null,
+      notes: null,
+      shift: actor.shift
+    };
+    const recs = listRecords();
+    recs.unshift(record);
+    saveRecords(recs);
+    machine.status = 'RED';
+    machine.activeRecordId = record.id;
+    saveMachine(machine);
+    logAudit(actor, machineId, 'PROBLEM_REPORTED', problemType);
+    return record;
+  }
+
+  function startWork(actor, machineId) {
+    assertCanOperate(actor, machineId, 'START_WORK');
+    const machine = getMachine(machineId);
+    if (!machine) throw new AuthError('missing_machine', 'Machine not found.');
+    if (machine.status !== 'RED') throw new AuthError('bad_transition', 'Machine is not in PROBLEM state.');
+    const record = getActiveRecordForMachine(machineId);
+    if (!record) throw new AuthError('missing_record', 'No active problem found.');
+    record.workStartedAt = nowIso();
+    record.workStartedBy = actor.name;
+    const recs = listRecords();
+    saveRecords(recs.map(r => (r.id === record.id ? record : r)));
+    machine.status = 'YELLOW';
+    saveMachine(machine);
+    logAudit(actor, machineId, 'WORK_STARTED', '');
+    return record;
+  }
+
+  function resolveProblem(actor, machineId, resolution, notes) {
+    assertCanOperate(actor, machineId, 'RESOLVE');
+    const machine = getMachine(machineId);
+    if (!machine) throw new AuthError('missing_machine', 'Machine not found.');
+    if (machine.status !== 'YELLOW') throw new AuthError('bad_transition', 'Machine is not in WORK IN PROGRESS state.');
+    const record = getActiveRecordForMachine(machineId);
+    if (!record) throw new AuthError('missing_record', 'No active problem found.');
+    const resolvedAt = new Date();
+    const downtimeMinutes = Math.round((resolvedAt - new Date(record.reportedAt)) / 60000);
+    record.resolvedAt = resolvedAt.toISOString();
+    record.resolvedBy = actor.name;
+    record.downtimeMinutes = downtimeMinutes;
+    record.status = 'resolved';
+    record.resolution = resolution;
+    record.notes = notes || '';
+    const recs = listRecords();
+    saveRecords(recs.map(r => (r.id === record.id ? record : r)));
+    machine.status = 'GREEN';
+    machine.activeRecordId = null;
+    saveMachine(machine);
+    logAudit(actor, machineId, 'PROBLEM_RESOLVED', `${resolution} (${downtimeMinutes} min)`);
+    return record;
+  }
+
+  // Supervisor/Admin: correct or cancel a wrongly reported problem.
+  function cancelProblem(actor, machineId, reason) {
+    if (!actor || !['ADMIN', 'SUPERVISOR'].includes(actor.role)) {
+      throw new AuthError('not_authorized', 'Only Supervisor/Admin can cancel a reported problem.');
+    }
+    const machine = getMachine(machineId);
+    if (!machine) throw new AuthError('missing_machine', 'Machine not found.');
+    const record = getActiveRecordForMachine(machineId);
+    if (!record) throw new AuthError('missing_record', 'No active problem found.');
+    record.status = 'cancelled';
+    record.resolvedAt = nowIso();
+    record.resolution = 'Cancelled by Supervisor/Admin';
+    record.notes = reason || '';
+    const recs = listRecords();
+    saveRecords(recs.map(r => (r.id === record.id ? record : r)));
+    machine.status = 'GREEN';
+    machine.activeRecordId = null;
+    saveMachine(machine);
+    logAudit(actor, machineId, 'PROBLEM_CANCELLED', reason || '');
+    return record;
+  }
+
+  // ---------- Categories (admin editable) ----------
+  function listCategories() { return read(LS_KEYS.categories, []); }
+  function addProblemType(actor, categoryId, label) {
+    requireAdmin(actor);
+    const cats = listCategories();
+    const cat = cats.find(c => c.id === categoryId);
+    if (!cat) throw new AuthError('missing', 'Category not found.');
+    cat.items.push(label);
+    write(LS_KEYS.categories, cats);
+    logAudit(actor, null, 'PROBLEM_TYPE_ADDED', `${categoryId}: ${label}`);
+  }
+  function addCategory(actor, id, label, icon) {
+    requireAdmin(actor);
+    const cats = listCategories();
+    if (cats.find(c => c.id === id)) throw new AuthError('dup', 'Category already exists.');
+    cats.push({ id, label, icon: icon || '❔', items: [] });
+    write(LS_KEYS.categories, cats);
+    logAudit(actor, null, 'CATEGORY_ADDED', label);
+  }
+
+  // ---------- Loss level helper (10 / 30 / 60 minute thresholds) ----------
+  function lossLevel(minutes) {
+    if (minutes >= 60) return { level: 'critical', label: '🚨 CRITICAL DOWNTIME' };
+    if (minutes >= 30) return { level: 'major', label: '🔴 MAJOR DOWNTIME' };
+    if (minutes >= 10) return { level: 'loss', label: '⚠️ PRODUCTION LOSS' };
+    return { level: 'ok', label: '' };
+  }
+
+  function liveDowntimeMinutes(record) {
+    if (!record) return 0;
+    return Math.max(0, Math.round((Date.now() - new Date(record.reportedAt).getTime()) / 60000));
+  }
+
+  // ---------- Reports ----------
+  function getReportData(rangeDays) {
+    const cutoff = rangeDays ? Date.now() - rangeDays * 86400000 : 0;
+    const recs = listRecords().filter(r => r.status === 'resolved' && new Date(r.reportedAt).getTime() >= cutoff);
+    const machines = listMachines();
+    const totalDowntime = recs.reduce((s, r) => s + (r.downtimeMinutes || 0), 0);
+    const byMachine = {};
+    const byCategory = {};
+    const byOperator = {};
+    let loss10 = 0, loss30 = 0, loss60 = 0;
+    recs.forEach(r => {
+      byMachine[r.machineId] = (byMachine[r.machineId] || 0) + r.downtimeMinutes;
+      byCategory[r.problemCategory] = (byCategory[r.problemCategory] || 0) + r.downtimeMinutes;
+      byOperator[r.operatorId] = (byOperator[r.operatorId] || 0) + 1;
+      if (r.downtimeMinutes >= 60) loss60++;
+      else if (r.downtimeMinutes >= 30) loss30++;
+      else if (r.downtimeMinutes >= 10) loss10++;
+    });
+    const topMachines = Object.entries(byMachine).sort((a, b) => b[1] - a[1]).slice(0, 10);
+    const topCategories = Object.entries(byCategory).sort((a, b) => b[1] - a[1]).slice(0, 10);
+    return {
+      totalMachines: machines.length,
+      runningMachines: machines.filter(m => m.status === 'GREEN').length,
+      problemMachines: machines.filter(m => m.status === 'RED').length,
+      maintenanceMachines: machines.filter(m => m.status === 'YELLOW').length,
+      totalDowntime,
+      numberOfProblems: recs.length,
+      averageDowntime: recs.length ? Math.round(totalDowntime / recs.length) : 0,
+      loss10, loss30, loss60,
+      topMachines, topCategories,
+      byOperator
+    };
+  }
+
+  global.KDM_DB = {
+    init, AuthError,
+    login, logout, getCurrentUser,
+    listUsers, addUser, updateUser, setUserActive,
+    listMachines, getMachine, addMachine, editMachine, deactivateMachine,
+    getAssignments, getAssignedOperator, getCurrentAssignedOperator, assignOperator,
+    listRecords, getActiveRecordForMachine,
+    reportProblem, startWork, resolveProblem, cancelProblem,
+    listCategories, addProblemType, addCategory,
+    lossLevel, liveDowntimeMinutes,
+    getReportData, getAuditLogs, logAudit
+  };
+})(window);
