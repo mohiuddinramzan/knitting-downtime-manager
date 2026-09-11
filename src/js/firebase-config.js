@@ -4,10 +4,10 @@
 // Leave apiKey as 'YOUR_API_KEY' to keep running in single-device mode
 // (localStorage only) — the app works fine either way.
 window.KDM_FIREBASE_CONFIG = {
-  apiKey: 'YOUR_API_KEY',
-  authDomain: 'YOUR_PROJECT_ID.firebaseapp.com',
-  projectId: 'YOUR_PROJECT_ID',
-  storageBucket: 'YOUR_PROJECT_ID.appspot.com',
-  messagingSenderId: 'YOUR_SENDER_ID',
-  appId: 'YOUR_APP_ID'
+  apiKey: "AIzaSyBaaVYn2N9SebVh62aIAnfYTbgU7fuBR2k",
+  authDomain: "knitting-downtime.firebaseapp.com",
+  projectId: "knitting-downtime",
+  storageBucket: "knitting-downtime.firebasestorage.app",
+  messagingSenderId: "222877720359",
+  appId: "1:222877720359:web:991def88a50df7cd411302"
 };
