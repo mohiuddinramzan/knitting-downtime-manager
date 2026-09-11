@@ -31,6 +31,13 @@
   <!-- jsQR: pure-JS QR decoder used for the in-app camera scanner (no paid/native plugin required) -->
   <script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js"></script>
 
+  <!-- Firebase (compat build): only activates if src/js/firebase-config.js has a real project config -->
+  <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js"></script>
+  <script src="src/js/firebase-config.js"></script>
+  <script src="src/js/sync.js"></script>
+
   <script src="src/js/categories.js"></script>
   <script src="src/js/seed-data.js"></script>
   <script src="src/js/db.js"></script>

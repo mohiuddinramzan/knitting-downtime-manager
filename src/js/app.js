@@ -73,6 +73,19 @@
 
   window.addEventListener('hashchange', render);
 
+  // ---------- Live refresh when another device changes shared data ----------
+  // Only safe on read-only screens — never on forms/flows where re-rendering
+  // would wipe out what the person is in the middle of typing/selecting.
+  const AUTO_REFRESH_ROUTES = ['dashboard', 'machines', 'machine', 'reports', 'audit'];
+  let refreshTimer = null;
+  window.addEventListener('kdm:data-changed', () => {
+    clearTimeout(refreshTimer);
+    refreshTimer = setTimeout(() => {
+      const base = (location.hash || '').replace(/^#\//, '').split('/')[0];
+      if (AUTO_REFRESH_ROUTES.includes(base)) render();
+    }, 300);
+  });
+
   // ---------- Offline banner ----------
   function updateOnlineStatus() {
     document.getElementById('offline-banner').classList.toggle('hidden', navigator.onLine);

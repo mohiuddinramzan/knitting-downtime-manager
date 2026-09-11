@@ -19,14 +19,16 @@ APK with **Capacitor**. That choice is deliberate: factory phones are often
 low/mid-range Android devices, and a plain WebView app stays light and fast
 on them.
 
-**Out of the box it runs with zero setup and zero paid services**, using the
-browser's `localStorage` as the data store. Every mutating action (report a
-problem, start work, resolve, assign an operator, admin edits) goes through
-one file, `src/js/db.js`, which re-checks the user's role and machine
-assignment *there* — not just by hiding a button in the UI. See
-[Section 6, Security model](#6-security-model) for exactly what that does
-and does not protect against, and how to move to a real backend
-(Firebase/Firestore) for a multi-device factory rollout.
+**Out of the box it runs single-device**, using the browser's `localStorage`
+as the data store — zero setup, zero paid services. Turn on the optional
+**Firebase real-time sync** (Section 6) to make every phone/PC see the same
+machines and problems live, the moment anyone reports/starts/resolves one.
+
+Every mutating action (report a problem, start work, resolve, assign an
+operator, admin edits) goes through one file, `src/js/db.js`, which
+re-checks the user's role and machine assignment *there* — not just by
+hiding a button in the UI. See [Section 7, Security model](#7-security-model)
+for exactly what that does and does not protect against.
 
 ## 2. Features
 
@@ -46,6 +48,8 @@ and does not protect against, and how to move to a real backend
 - Admin panel: users, machines, shift assignments, problem categories
 - Bilingual (English/Bengali) labels on all status and action text
 - Offline banner + non-blocking UI if the connection drops
+- **Optional real-time multi-device sync** via Firebase (Section 6) — report
+  on one phone, see it update live on every other phone/PC
 
 ## 3. User roles
 
@@ -125,11 +129,74 @@ cd android && ./gradlew assembleDebug
 # APK: android/app/build/outputs/apk/debug/app-debug.apk
 ```
 
-## 6. Security model
+## 6. Multi-device real-time sync (Firebase)
 
-**Default (localStorage) mode.** All authorization logic lives in
-`src/js/db.js`, in one place, and every screen calls into it rather than
-deciding on its own whether an action is allowed. This means:
+By default every phone keeps its own local copy of the data — great for
+trying the app, not useful if you want a supervisor's phone or the office
+PC to see a problem the moment an operator reports it. Turning on Firebase
+Firestore (free tier, no credit card needed for this scale) makes every
+device share and see the same live data.
+
+**সহজ ভাষায়:** নিচের ধাপগুলো একবার করে দিলে, একটা ফোনে সমস্যা রিপোর্ট করলে
+সাথে সাথে অন্য সব ফোন/পিসিতেও দেখা যাবে — সবাইকে একই কনফিগার করা APK ইনস্টল
+করতে হবে।
+
+### Step 1 — Create a Firebase project (free)
+1. Go to <https://console.firebase.google.com> → **Add project** → give it
+   any name → you can turn off Google Analytics → **Create project**.
+
+### Step 2 — Turn on Firestore
+1. In the left menu: **Build → Firestore Database → Create database**.
+2. Choose **Start in production mode** → pick any region → **Enable**.
+
+### Step 3 — Turn on Anonymous sign-in
+1. Left menu: **Build → Authentication → Get started**.
+2. Under **Sign-in method**, enable **Anonymous** → **Save**.
+   (This just lets the app tell Firestore "this request came from someone
+   who opened our app" — it is not a real user account and never asks
+   anyone to sign up.)
+
+### Step 4 — Publish the security rules
+1. **Firestore Database → Rules** tab.
+2. Delete what's there, paste in the contents of `firestore.rules` from
+   this repo, click **Publish**.
+
+### Step 5 — Get your web app config
+1. Project settings (gear icon, top left) → scroll to **Your apps** →
+   click the **`</>`** (Web) icon → register an app (any nickname, no
+   hosting needed) → copy the `firebaseConfig` object it shows you.
+
+### Step 6 — Paste it into the project
+Open `src/js/firebase-config.js` and replace the placeholder values with
+the ones you copied, e.g.:
+
+```js
+window.KDM_FIREBASE_CONFIG = {
+  apiKey: 'AIzaSy...',
+  authDomain: 'my-factory.firebaseapp.com',
+  projectId: 'my-factory',
+  storageBucket: 'my-factory.appspot.com',
+  messagingSenderId: '123456789',
+  appId: '1:123456789:web:abcdef'
+};
+```
+
+Commit and push this file, then rebuild the APK (Section 5) and install it
+on **every** phone/PC that should share data — they all need to be running
+a build with the same config.
+
+That's it — no other code changes needed. The very first device that opens
+the app after this seeds Firestore with the demo machines/users; every
+device after that reads and writes the shared data, live.
+
+**What this does and doesn't protect** — see
+[Section 7, Security model](#7-security-model).
+
+## 7. Security model
+
+**Every build** (with or without Firebase) keeps all authorization logic in
+one place: `src/js/db.js`. Every screen calls into it rather than deciding
+on its own whether an action is allowed. This means:
 
 - An operator cannot report a problem on a machine assigned to someone else
   — `db.js` checks the *current* assignment record, not whatever the UI
@@ -138,44 +205,41 @@ deciding on its own whether an action is allowed. This means:
   `AuthError` if called by anyone but an Admin, even if invoked directly
   from the browser console.
 - The audit log has no delete/update function anywhere in the codebase —
-  it is structurally append-only.
+  it is structurally append-only, and (once Firebase is on) `firestore.rules`
+  also blocks update/delete at the database level, not just in the app.
 
-**What this does *not* do:** because `localStorage` lives entirely on the
-device, a technically sophisticated user could still edit it directly in
+**Single-device (localStorage only) mode:** because the data lives entirely
+on the device, a technically sophisticated user could edit it directly in
 browser devtools on *their own phone* to give themselves a different role.
-This is the correct trade-off for a free, zero-setup pilot on a single
-device or a small trusted team, but **it is not a substitute for
-server-side enforcement in a real multi-device rollout.**
+Fine for a free, zero-setup pilot on a small trusted team; not a substitute
+for server-side enforcement.
 
-**Moving to a real backend.** `firestore.rules` in this repo mirrors the
-exact same rules as `db.js` (assignment checks, role checks, append-only
-audit log) enforced server-side by Firestore. To switch:
+**With Firebase sync on:** `firestore.rules` requires every request to be
+signed in (even anonymously) before touching any data, which blocks random
+internet traffic from reaching your database. It does **not** stop someone
+who has the app installed from opening devtools and calling the Firestore
+SDK directly to bypass a role check — closing that gap needs giving every
+operator/technician/supervisor/admin a real Firebase Auth account (instead
+of the shared anonymous session) and rules keyed off `request.auth.uid`,
+which in turn needs a small backend (e.g. a Cloud Function) to issue those
+accounts safely. That's a reasonable next step for a larger rollout, but
+out of scope for the free, no-code-backend setup this project ships with —
+for a single factory's trusted team, the app-level checks plus "you must
+have the app to reach the database at all" is a sensible trade-off.
 
-1. Create a Firebase project (free Spark plan is enough for a factory pilot).
-2. `firebase deploy --only firestore:rules` using the provided
-   `firestore.rules`.
-3. Replace the bodies of the functions in `src/js/db.js` with calls to the
-   Firebase SDK (Auth for login, Firestore for reads/writes) — the function
-   *signatures* (`reportProblem(user, machineId, ...)` etc.) are designed
-   to stay the same so the screens in `src/screens/*.js` don't need to change.
-4. Never put a Firebase service-account key or admin secret in this repo —
-   only the public web SDK config, which is safe to ship in a client app
-   *because* the security rules (not the client) are what actually enforce
-   permissions.
+## 8. Database structure
 
-## 7. Database structure
-
-Collections/records (used as-is by the localStorage layer; the same shape
-Firestore documents should use if you migrate):
+Collections/records (same shape whether you're reading them from
+`localStorage` or, once Section 6 is set up, from Firestore):
 
 - **users**: `id, name, pin, role, shift, active`
 - **machines**: `id, model, order, status, activeRecordId`
-- **machineAssignments**: `{ [shift]: { [machineId]: operatorId } }`
-- **problemCategories**: `id, label, icon, items[]`
+- **meta/assignments** (single doc): `{ [shift]: { [machineId]: operatorId } }`
+- **meta/categories** (single doc): `{ list: [{ id, label, icon, items[] }] }`
 - **downtimeRecords**: `id, machineId, reportedBy, operatorId, problemCategory, problemType, reportedAt, workStartedAt, workStartedBy, resolvedAt, resolvedBy, downtimeMinutes, status, resolution, notes, shift`
 - **auditLogs**: `id, timestamp, userId, userName, machineId, action, details` (append-only)
 
-## 8. Creating machines & operators (Admin Panel)
+## 9. Creating machines & operators (Admin Panel)
 
 Log in as `ADMIN1` / `0000` → **More → Admin Panel**:
 
@@ -189,7 +253,10 @@ Log in as `ADMIN1` / `0000` → **More → Admin Panel**:
   categories (Technical, Yarn/Lycra, Quality, Setting, Maintenance, Power,
   Material, Production, Manpower, Factory/Management, Emergency).
 
-## 9. QR codes for machines
+If Firebase sync is on, anything you add here appears on every other
+device within a second or two.
+
+## 10. QR codes for machines
 
 Each machine's QR code should simply encode its **machine ID as plain text**
 (e.g. `K-101`) — print one per machine and stick it on the frame. The in-app
@@ -197,7 +264,7 @@ scanner (**Floor → 📷 Scan**) reads it and jumps straight to that machine's
 detail screen, running the same authorization check as tapping it from the
 list.
 
-## 10. Project structure
+## 11. Project structure
 
 ```
 /
@@ -208,7 +275,11 @@ list.
 ├── scripts/build.js        # assembles ./www for Capacitor
 ├── src/
 │   ├── css/styles.css
-│   ├── js/                 # data layer, auth, categories, router, ui helpers
+│   ├── js/
+│   │   ├── firebase-config.js  # paste your Firebase web config here (Section 6)
+│   │   ├── sync.js             # Firebase bridge — no-ops if not configured
+│   │   ├── db.js               # data + authorization layer
+│   │   ├── categories.js, seed-data.js, ui-helpers.js, app.js
 │   └── screens/            # one file per screen
 ├── .github/workflows/build-apk.yml
 └── README.md

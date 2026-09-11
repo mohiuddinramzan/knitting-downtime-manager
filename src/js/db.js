@@ -52,6 +52,16 @@
     }
   }
 
+  // Optional real-time multi-device bridge (see sync.js). Falls back to
+  // no-ops if Firebase isn't configured, so this file works standalone.
+  const sync = global.KDM_SYNC || {
+    enabled: false, push: () => Promise.resolve(), setDoc: () => Promise.resolve(),
+    subscribeCollection: () => () => {}, subscribeDoc: () => () => {}
+  };
+  function dispatchRemoteChange() {
+    try { window.dispatchEvent(new CustomEvent('kdm:data-changed')); } catch (e) { /* no-op */ }
+  }
+
   function init() {
     if (!read(LS_KEYS.users, null)) write(LS_KEYS.users, global.KDM_SEED.users);
     if (!read(LS_KEYS.machines, null)) write(LS_KEYS.machines, global.KDM_SEED.machines);
@@ -60,12 +70,72 @@
     if (!read(LS_KEYS.records, null)) write(LS_KEYS.records, []);
     if (!read(LS_KEYS.audit, null)) write(LS_KEYS.audit, []);
     if (!read(LS_KEYS.settings, null)) write(LS_KEYS.settings, { factoryName: 'Knitting Floor' });
+
+    if (sync.enabled) initRemoteSync();
+  }
+
+  // Wires up real-time listeners so every device converges on the same
+  // data. The very first device to connect "seeds" Firestore with its
+  // local copy (harmless even if two devices race — doc IDs are the
+  // machine/user/record ID, so a duplicate seed just overwrites itself).
+  function initRemoteSync() {
+    let seededUsers = false, seededMachines = false, seededAssignments = false, seededCategories = false;
+
+    sync.subscribeCollection('users', (docs) => {
+      if (docs.length === 0 && !seededUsers) {
+        seededUsers = true;
+        listUsers().forEach(u => sync.push('users', u.id, u));
+        return;
+      }
+      if (docs.length) { write(LS_KEYS.users, docs); dispatchRemoteChange(); }
+    });
+
+    sync.subscribeCollection('machines', (docs) => {
+      if (docs.length === 0 && !seededMachines) {
+        seededMachines = true;
+        listMachines().forEach(m => sync.push('machines', m.id, m));
+        return;
+      }
+      if (docs.length) { write(LS_KEYS.machines, docs); dispatchRemoteChange(); }
+    });
+
+    sync.subscribeDoc('meta/assignments', (data) => {
+      if (!data && !seededAssignments) {
+        seededAssignments = true;
+        sync.setDoc('meta/assignments', getAssignments());
+        return;
+      }
+      if (data) { write(LS_KEYS.assignments, data); dispatchRemoteChange(); }
+    });
+
+    sync.subscribeDoc('meta/categories', (data) => {
+      if (!data && !seededCategories) {
+        seededCategories = true;
+        sync.setDoc('meta/categories', { list: listCategories() });
+        return;
+      }
+      if (data && data.list) { write(LS_KEYS.categories, data.list); dispatchRemoteChange(); }
+    });
+
+    sync.subscribeCollection('downtimeRecords', (docs) => {
+      if (!docs.length) return; // nothing to merge yet; local records push themselves up as they're created
+      docs.sort((a, b) => new Date(b.reportedAt) - new Date(a.reportedAt));
+      write(LS_KEYS.records, docs);
+      dispatchRemoteChange();
+    });
+
+    sync.subscribeCollection('auditLogs', (docs) => {
+      if (!docs.length) return;
+      docs.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+      write(LS_KEYS.audit, docs);
+      dispatchRemoteChange();
+    });
   }
 
   // ---------- Audit ----------
   function logAudit(user, machineId, action, details) {
     const logs = read(LS_KEYS.audit, []);
-    logs.unshift({
+    const entry = {
       id: uid('log'),
       timestamp: nowIso(),
       userId: user ? user.id : 'SYSTEM',
@@ -73,8 +143,10 @@
       machineId: machineId || null,
       action,
       details: details || ''
-    });
+    };
+    logs.unshift(entry);
     write(LS_KEYS.audit, logs);
+    sync.push('auditLogs', entry.id, entry);
   }
   function getAuditLogs() { return read(LS_KEYS.audit, []); }
 
@@ -115,8 +187,10 @@
     requireAdmin(actor);
     const users = listUsers();
     if (users.find(u => u.id === userData.id)) throw new AuthError('dup', 'User ID already exists.');
-    users.push(Object.assign({ active: true }, userData));
+    const newUser = Object.assign({ active: true }, userData);
+    users.push(newUser);
     write(LS_KEYS.users, users);
+    sync.push('users', newUser.id, newUser);
     logAudit(actor, null, 'USER_ADDED', `${userData.id} (${userData.role})`);
   }
   function updateUser(actor, userId, patch) {
@@ -130,6 +204,7 @@
     }
     users[idx] = Object.assign({}, users[idx], patch);
     write(LS_KEYS.users, users);
+    sync.push('users', users[idx].id, users[idx]);
     logAudit(actor, null, 'USER_UPDATED', userId);
   }
   function setUserActive(actor, userId, active) {
@@ -140,7 +215,11 @@
   function updateUserRaw(userId, patch) {
     const users = listUsers();
     const idx = users.findIndex(u => u.id === userId);
-    if (idx !== -1) { users[idx] = Object.assign({}, users[idx], patch); write(LS_KEYS.users, users); }
+    if (idx !== -1) {
+      users[idx] = Object.assign({}, users[idx], patch);
+      write(LS_KEYS.users, users);
+      sync.push('users', users[idx].id, users[idx]);
+    }
   }
 
   // ---------- Machines ----------
@@ -151,6 +230,7 @@
     const idx = machines.findIndex(m => m.id === machine.id);
     if (idx === -1) machines.push(machine); else machines[idx] = machine;
     write(LS_KEYS.machines, machines);
+    sync.push('machines', machine.id, machine);
   }
   function addMachine(actor, data) {
     requireAdmin(actor);
@@ -194,6 +274,7 @@
     if (!a[shift]) a[shift] = {};
     a[shift][machineId] = operatorId;
     write(LS_KEYS.assignments, a);
+    sync.setDoc('meta/assignments', a);
     logAudit(actor, machineId, 'OPERATOR_ASSIGNED', `${operatorId} -> ${machineId} (${shift})`);
   }
 
@@ -258,6 +339,7 @@
     const recs = listRecords();
     recs.unshift(record);
     saveRecords(recs);
+    sync.push('downtimeRecords', record.id, record);
     machine.status = 'RED';
     machine.activeRecordId = record.id;
     saveMachine(machine);
@@ -276,6 +358,7 @@
     record.workStartedBy = actor.name;
     const recs = listRecords();
     saveRecords(recs.map(r => (r.id === record.id ? record : r)));
+    sync.push('downtimeRecords', record.id, record);
     machine.status = 'YELLOW';
     saveMachine(machine);
     logAudit(actor, machineId, 'WORK_STARTED', '');
@@ -299,6 +382,7 @@
     record.notes = notes || '';
     const recs = listRecords();
     saveRecords(recs.map(r => (r.id === record.id ? record : r)));
+    sync.push('downtimeRecords', record.id, record);
     machine.status = 'GREEN';
     machine.activeRecordId = null;
     saveMachine(machine);
@@ -321,6 +405,7 @@
     record.notes = reason || '';
     const recs = listRecords();
     saveRecords(recs.map(r => (r.id === record.id ? record : r)));
+    sync.push('downtimeRecords', record.id, record);
     machine.status = 'GREEN';
     machine.activeRecordId = null;
     saveMachine(machine);
@@ -337,6 +422,7 @@
     if (!cat) throw new AuthError('missing', 'Category not found.');
     cat.items.push(label);
     write(LS_KEYS.categories, cats);
+    sync.setDoc('meta/categories', { list: cats });
     logAudit(actor, null, 'PROBLEM_TYPE_ADDED', `${categoryId}: ${label}`);
   }
   function addCategory(actor, id, label, icon) {
@@ -345,6 +431,7 @@
     if (cats.find(c => c.id === id)) throw new AuthError('dup', 'Category already exists.');
     cats.push({ id, label, icon: icon || '❔', items: [] });
     write(LS_KEYS.categories, cats);
+    sync.setDoc('meta/categories', { list: cats });
     logAudit(actor, null, 'CATEGORY_ADDED', label);
   }
 
