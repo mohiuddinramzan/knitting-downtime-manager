@@ -62,6 +62,17 @@
     try { window.dispatchEvent(new CustomEvent('kdm:data-changed')); } catch (e) { /* no-op */ }
   }
 
+  // In Firebase mode, the signed-in user's profile (role/name/shift) lives
+  // in Firestore keyed by their Firebase Auth UID. We cache it here (and in
+  // localStorage, for instant reload) so getCurrentUser() can stay
+  // synchronous everywhere else in the app.
+  let _currentUserCache = null;
+  let _authResolvedResolve;
+  const _authResolved = new Promise((res) => { _authResolvedResolve = res; });
+  function _resolveAuthOnce() {
+    if (_authResolvedResolve) { _authResolvedResolve(); _authResolvedResolve = null; }
+  }
+
   function init() {
     if (!read(LS_KEYS.users, null)) write(LS_KEYS.users, global.KDM_SEED.users);
     if (!read(LS_KEYS.machines, null)) write(LS_KEYS.machines, global.KDM_SEED.machines);
@@ -71,7 +82,38 @@
     if (!read(LS_KEYS.audit, null)) write(LS_KEYS.audit, []);
     if (!read(LS_KEYS.settings, null)) write(LS_KEYS.settings, { factoryName: 'Knitting Floor' });
 
-    if (sync.enabled) initRemoteSync();
+    if (sync.enabled) {
+      initRemoteSync();
+      // Restore whatever profile we cached from the last session immediately
+      // (avoids a flash of the login screen on cold start), then let
+      // Firebase's own session check confirm/replace it.
+      _currentUserCache = read(LS_KEYS.session, null);
+      sync.onAuthChange((fbUser) => {
+        if (!fbUser) {
+          _currentUserCache = null;
+          write(LS_KEYS.session, null);
+          _resolveAuthOnce();
+          dispatchRemoteChange();
+          return;
+        }
+        sync.getDocOnce('users/' + fbUser.uid).then((profile) => {
+          if (!profile || profile.active === false) {
+            _currentUserCache = null;
+            write(LS_KEYS.session, null);
+            sync.signOut();
+            _resolveAuthOnce();
+            dispatchRemoteChange();
+            return;
+          }
+          _currentUserCache = Object.assign({ id: fbUser.uid, email: fbUser.email }, profile);
+          write(LS_KEYS.session, _currentUserCache);
+          _resolveAuthOnce();
+          dispatchRemoteChange();
+        });
+      });
+    } else {
+      _resolveAuthOnce();
+    }
   }
 
   // Wires up real-time listeners so every device converges on the same
@@ -151,27 +193,59 @@
   function getAuditLogs() { return read(LS_KEYS.audit, []); }
 
   // ---------- Auth ----------
-  function login(userId, pin) {
-    const users = read(LS_KEYS.users, []);
-    const user = users.find(u => u.id.toLowerCase() === String(userId).toLowerCase());
-    if (!user || !user.active) {
-      logAudit(null, null, 'LOGIN_FAILED', `Unknown or disabled user id: ${userId}`);
-      throw new AuthError('unknown_user', 'Invalid ID or PIN.');
+  // Always returns a Promise, in both modes, so screens have one consistent
+  // API regardless of whether Firebase is configured.
+  function login(idOrEmail, pinOrPassword) {
+    if (sync.enabled) {
+      return sync.signIn(idOrEmail, pinOrPassword)
+        .then((cred) => sync.getDocOnce('users/' + cred.user.uid).then((profile) => {
+          if (!profile || profile.active === false) {
+            return sync.signOut().then(() => {
+              throw new AuthError('disabled', 'This account is disabled. Contact Admin.');
+            });
+          }
+          const user = Object.assign({ id: cred.user.uid, email: idOrEmail }, profile);
+          _currentUserCache = user;
+          write(LS_KEYS.session, user);
+          logAudit(user, null, 'LOGIN', '');
+          return user;
+        }))
+        .catch((e) => {
+          if (e && e.name === 'AuthError') throw e;
+          logAudit(null, null, 'LOGIN_FAILED', idOrEmail);
+          throw new AuthError('bad_credentials', 'Invalid email or password.');
+        });
     }
-    if (String(user.pin) !== String(pin)) {
-      logAudit(user, null, 'LOGIN_FAILED', 'Wrong PIN');
-      throw new AuthError('wrong_pin', 'Invalid ID or PIN.');
+    // ---- local ID+PIN mode (single device, no Firebase configured) ----
+    try {
+      const users = read(LS_KEYS.users, []);
+      const user = users.find(u => u.id.toLowerCase() === String(idOrEmail).toLowerCase());
+      if (!user || !user.active) {
+        logAudit(null, null, 'LOGIN_FAILED', `Unknown or disabled user id: ${idOrEmail}`);
+        throw new AuthError('unknown_user', 'Invalid ID or PIN.');
+      }
+      if (String(user.pin) !== String(pinOrPassword)) {
+        logAudit(user, null, 'LOGIN_FAILED', 'Wrong PIN');
+        throw new AuthError('wrong_pin', 'Invalid ID or PIN.');
+      }
+      write(LS_KEYS.session, { userId: user.id, loginAt: nowIso() });
+      logAudit(user, null, 'LOGIN', '');
+      return Promise.resolve(user);
+    } catch (e) {
+      return Promise.reject(e);
     }
-    write(LS_KEYS.session, { userId: user.id, loginAt: nowIso() });
-    logAudit(user, null, 'LOGIN', '');
-    return user;
   }
+
   function logout() {
     const u = getCurrentUser();
     write(LS_KEYS.session, null);
+    _currentUserCache = null;
     if (u) logAudit(u, null, 'LOGOUT', '');
+    return sync.enabled ? sync.signOut() : Promise.resolve();
   }
+
   function getCurrentUser() {
+    if (sync.enabled) return _currentUserCache;
     const session = read(LS_KEYS.session, null);
     if (!session) return null;
     const users = read(LS_KEYS.users, []);
@@ -185,13 +259,41 @@
   }
   function addUser(actor, userData) {
     requireAdmin(actor);
+    if (sync.enabled) {
+      if (!userData.email || !userData.password) {
+        return Promise.reject(new AuthError('missing_fields', 'Email and password are required.'));
+      }
+      return sync.createUserKeepingCurrentSession(userData.email, userData.password)
+        .then((newUid) => {
+          const profile = { name: userData.name, role: userData.role, shift: userData.shift, active: true, email: userData.email };
+          return sync.push('users', newUid, profile).then(() => {
+            const newUser = Object.assign({ id: newUid }, profile);
+            // Optimistic local cache update — the Firestore listener will confirm this in a moment too.
+            const users = listUsers();
+            users.push(newUser);
+            write(LS_KEYS.users, users);
+            logAudit(actor, null, 'USER_ADDED', `${userData.email} (${userData.role})`);
+            return newUser;
+          });
+        })
+        .catch((e) => {
+          if (e && e.name === 'AuthError') throw e;
+          if (e && e.code === 'auth/email-already-in-use') throw new AuthError('dup', 'This email is already registered.');
+          if (e && e.code === 'auth/weak-password') throw new AuthError('weak_password', 'Password should be at least 6 characters.');
+          if (e && e.code === 'auth/invalid-email') throw new AuthError('bad_email', 'That email address looks invalid.');
+          console.error('[addUser]', e);
+          throw new AuthError('create_failed', 'Could not create the account.');
+        });
+    }
+    // ---- local ID+PIN mode ----
     const users = listUsers();
-    if (users.find(u => u.id === userData.id)) throw new AuthError('dup', 'User ID already exists.');
+    if (users.find(u => u.id === userData.id)) return Promise.reject(new AuthError('dup', 'User ID already exists.'));
     const newUser = Object.assign({ active: true }, userData);
     users.push(newUser);
     write(LS_KEYS.users, users);
     sync.push('users', newUser.id, newUser);
     logAudit(actor, null, 'USER_ADDED', `${userData.id} (${userData.role})`);
+    return Promise.resolve(newUser);
   }
   function updateUser(actor, userId, patch) {
     requireAdmin(actor);
@@ -483,7 +585,7 @@
   }
 
   global.KDM_DB = {
-    init, AuthError,
+    init, AuthError, authResolved: _authResolved,
     login, logout, getCurrentUser,
     listUsers, addUser, updateUser, setUserActive,
     listMachines, getMachine, addMachine, editMachine, deactivateMachine,

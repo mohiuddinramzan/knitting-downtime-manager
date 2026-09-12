@@ -107,5 +107,6 @@
   on('admin', global.KDM_SCREENS.admin);
   on('more', global.KDM_SCREENS.more);
 
-  render();
+  appEl.innerHTML = '<div class="center muted" style="padding-top:40vh;">Loading…</div>';
+  db.authResolved.then(render);
 })(window);

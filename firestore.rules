@@ -1,28 +1,17 @@
 // Firestore Security Rules — Knitting Machine Downtime Manager
 //
-// How auth actually works in this app: every device signs in
-// *anonymously* (see src/js/sync.js) just so Firestore can tell "this is
-// a request from someone who loaded our app" apart from a random stranger
-// on the internet. The app's own ID+PIN login (Operator/Technician/
-// Supervisor/Admin) is a separate, app-level check enforced in
-// src/js/db.js on every device.
+// This matches the REAL login model the app now uses: every
+// Operator/Technician/Supervisor/Admin has their own Firebase Auth
+// account (email + password), created only by an Admin (from the
+// in-app Admin Panel, or manually the very first time - see README
+// Section 6). There is no anonymous/guest access anymore - nobody can
+// open the app and do anything without an account someone gave them.
 //
-// WHAT THIS PROTECTS AGAINST: random internet traffic hitting your
-// Firestore database directly (nobody can read/write without first
-// loading the app and getting an anonymous session).
-//
-// WHAT THIS DOES NOT PROTECT AGAINST: a person who has the app installed
-// deciding to open browser devtools and call the Firestore SDK directly
-// to bypass the role checks in db.js. Closing that gap requires giving
-// each operator/technician/supervisor/admin a *real* Firebase Auth
-// account (not just anonymous) and rewriting these rules to check
-// request.auth.uid against a role stored server-side — which needs a
-// backend (e.g. a Cloud Function) to issue those accounts safely. That's
-// a reasonable next step for a larger rollout, but out of scope for the
-// free, no-code-backend setup this project ships with.
+// Each user's role/name/shift lives in Firestore at /users/{uid}, where
+// {uid} is their Firebase Auth UID. Passwords are never stored in
+// Firestore - Firebase Authentication handles those securely.
 //
 // Deploy: Firebase Console -> Firestore Database -> Rules -> paste this -> Publish
-// (or: firebase deploy --only firestore:rules, if you use the CLI)
 
 rules_version = '2';
 
@@ -33,28 +22,72 @@ service cloud.firestore {
       return request.auth != null;
     }
 
+    function myProfile() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data;
+    }
+
+    function isActive() {
+      return signedIn() && myProfile().active == true;
+    }
+
+    function myRole() {
+      return isActive() ? myProfile().role : null;
+    }
+
+    function isAdmin() { return myRole() == 'ADMIN'; }
+    function isSupervisorOrAdmin() { return myRole() == 'SUPERVISOR' || myRole() == 'ADMIN'; }
+
+    function isAssignedTo(machineId) {
+      let a = get(/databases/$(database)/documents/meta/assignments).data;
+      return myRole() == 'OPERATOR' &&
+        a.get(myProfile().shift, {}).get(machineId, '') == request.auth.uid;
+    }
+
+    // ---------- users (profiles only - no passwords live here) ----------
     match /users/{userId} {
-      allow read, write: if signedIn();
+      allow read: if isActive();
+      allow write: if isAdmin();
     }
 
+    // ---------- machines ----------
     match /machines/{machineId} {
-      allow read, write: if signedIn();
+      allow read: if isActive();
+      allow write: if isActive() && (
+        isSupervisorOrAdmin() || myRole() == 'TECHNICIAN' || isAssignedTo(machineId)
+      );
     }
 
-    match /meta/{docId} {
-      // assignments, categories, settings
-      allow read, write: if signedIn();
+    // ---------- meta/assignments, meta/categories, meta/settings ----------
+    match /meta/assignments {
+      allow read: if isActive();
+      allow write: if isSupervisorOrAdmin();
+    }
+    match /meta/categories {
+      allow read: if isActive();
+      allow write: if isAdmin();
+    }
+    match /meta/settings {
+      allow read: if isActive();
+      allow write: if isAdmin();
     }
 
+    // ---------- downtimeRecords ----------
     match /downtimeRecords/{recordId} {
-      allow read, write: if signedIn();
+      allow read: if isActive();
+      allow create: if isActive() && (
+        isSupervisorOrAdmin() || myRole() == 'TECHNICIAN' || isAssignedTo(request.resource.data.machineId)
+      );
+      allow update: if isActive() && (
+        isSupervisorOrAdmin() || myRole() == 'TECHNICIAN' || isAssignedTo(resource.data.machineId)
+      );
+      // Corrections are modeled as status: 'cancelled', never a delete.
+      allow delete: if false;
     }
 
-    // Audit log: any signed-in device can add an entry, but nothing can
-    // ever edit or delete one - enforced here at the database level, not
-    // just by db.js not exposing a delete function.
+    // ---------- auditLogs: append-only for everyone, no exceptions ----------
     match /auditLogs/{logId} {
-      allow read, create: if signedIn();
+      allow read: if isSupervisorOrAdmin();
+      allow create: if isActive();
       allow update, delete: if false;
     }
   }

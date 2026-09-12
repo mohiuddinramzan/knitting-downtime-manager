@@ -33,7 +33,7 @@
       item.innerHTML = `
         <span class="log-time">${ui.fmtTime(l.timestamp)} · ${ui.fmtDate(l.timestamp)}</span>
         <span class="badge">${ui.escapeHtml(ACTION_LABELS[l.action] || l.action)}</span>
-        <div class="log-meta">${ui.escapeHtml(l.userId)}${l.machineId ? ' · ' + ui.escapeHtml(l.machineId) : ''}${l.details ? ' · ' + ui.escapeHtml(l.details) : ''}</div>
+        <div class="log-meta">${ui.escapeHtml(l.userName || l.userId)}${l.machineId ? ' · ' + ui.escapeHtml(l.machineId) : ''}${l.details ? ' · ' + ui.escapeHtml(l.details) : ''}</div>
       `;
       list.appendChild(item);
     });

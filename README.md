@@ -129,17 +129,21 @@ cd android && ./gradlew assembleDebug
 # APK: android/app/build/outputs/apk/debug/app-debug.apk
 ```
 
-## 6. Multi-device real-time sync (Firebase)
+## 6. Multi-device real-time sync + real login (Firebase)
 
-By default every phone keeps its own local copy of the data — great for
-trying the app, not useful if you want a supervisor's phone or the office
-PC to see a problem the moment an operator reports it. Turning on Firebase
-Firestore (free tier, no credit card needed for this scale) makes every
-device share and see the same live data.
+By default every phone keeps its own local copy of the data, logged in with
+a shared demo ID+PIN — great for trying the app, not something you'd want
+live in a factory. Turning on Firebase makes two things happen together:
 
-**সহজ ভাষায়:** নিচের ধাপগুলো একবার করে দিলে, একটা ফোনে সমস্যা রিপোর্ট করলে
-সাথে সাথে অন্য সব ফোন/পিসিতেও দেখা যাবে — সবাইকে একই কনফিগার করা APK ইনস্টল
-করতে হবে।
+1. **Real accounts.** Login becomes email + password. Nobody can open the
+   app and use it — there's no guest/anonymous access at all. Only people
+   an Admin has explicitly created an account for can log in.
+2. **Real-time sync.** Every phone/PC signed in sees the same machines and
+   problems live, the moment anyone reports/starts/resolves one.
+
+**সহজ ভাষায়:** এই সেটআপ শেষ হলে, অ্যাপে ঢুকতে হলে অবশ্যই ইমেইল+পাসওয়ার্ড
+লাগবে — Admin না বানিয়ে দিলে কেউ লগইনই করতে পারবে না। আর একবার লগইন করলে,
+একজনের রিপোর্ট করা সমস্যা সাথে সাথে অন্য সব ফোন/পিসিতেও দেখা যাবে।
 
 ### Step 1 — Create a Firebase project (free)
 1. Go to <https://console.firebase.google.com> → **Add project** → give it
@@ -149,12 +153,14 @@ device share and see the same live data.
 1. In the left menu: **Build → Firestore Database → Create database**.
 2. Choose **Start in production mode** → pick any region → **Enable**.
 
-### Step 3 — Turn on Anonymous sign-in
-1. Left menu: **Build → Authentication → Get started**.
-2. Under **Sign-in method**, enable **Anonymous** → **Save**.
-   (This just lets the app tell Firestore "this request came from someone
-   who opened our app" — it is not a real user account and never asks
-   anyone to sign up.)
+### Step 3 — Turn on Email/Password sign-in
+1. Left menu: **Build → Authentication → Get started** (or open it if
+   already started).
+2. **Sign-in method** tab → **Add new provider** (or click **Email/Password**
+   if it's already listed) → enable it → **Save**.
+   (If you enabled **Anonymous** sign-in while following an earlier version
+   of this guide, you can leave it or disable it — the app no longer uses
+   it, so it's just unused, not a security problem either way.)
 
 ### Step 4 — Publish the security rules
 1. **Firestore Database → Rules** tab.
@@ -164,7 +170,8 @@ device share and see the same live data.
 ### Step 5 — Get your web app config
 1. Project settings (gear icon, top left) → scroll to **Your apps** →
    click the **`</>`** (Web) icon → register an app (any nickname, no
-   hosting needed) → copy the `firebaseConfig` object it shows you.
+   hosting needed) → pick **"Use script tag"** (not "Use npm") → copy the
+   `firebaseConfig = { ... }` object.
 
 ### Step 6 — Paste it into the project
 Open `src/js/firebase-config.js` and replace the placeholder values with
@@ -181,13 +188,37 @@ window.KDM_FIREBASE_CONFIG = {
 };
 ```
 
-Commit and push this file, then rebuild the APK (Section 5) and install it
-on **every** phone/PC that should share data — they all need to be running
-a build with the same config.
+### Step 7 — Create your first Admin account (one manual step, one time only)
 
-That's it — no other code changes needed. The very first device that opens
-the app after this seeds Firestore with the demo machines/users; every
-device after that reads and writes the shared data, live.
+The Admin Panel is what normally creates new logins — but the very first
+Admin has to be created manually, since there's no Admin yet to click the
+button. Do this once:
+
+1. **Firebase Console → Authentication → Users tab → Add user.**
+   Enter an email and password for yourself → **Add user**.
+2. Copy the **User UID** shown for that new user (a long string like
+   `aB3xY...`).
+3. **Firestore Database → Data tab** → **Start collection** → Collection ID:
+   `users` → **Document ID: paste the UID you copied** → add these fields:
+
+   | Field | Type | Value |
+   |---|---|---|
+   | `name` | string | your name |
+   | `role` | string | `ADMIN` |
+   | `shift` | string | `General / Day Shift` |
+   | `active` | boolean | `true` |
+   | `email` | string | the email you used in step 1 |
+
+   → **Save**.
+
+That's it — log into the app with that email/password, and use **More →
+Admin Panel → Users tab** to create every other Operator/Technician/
+Supervisor/Admin account from now on (no more manual Console steps needed
+for anyone after this).
+
+Commit and push `firebase-config.js`, then rebuild the APK (Section 5) and
+install it on **every** phone/PC that should share data — they all need to
+be running a build with the same config.
 
 **What this does and doesn't protect** — see
 [Section 7, Security model](#7-security-model).
@@ -214,25 +245,25 @@ browser devtools on *their own phone* to give themselves a different role.
 Fine for a free, zero-setup pilot on a small trusted team; not a substitute
 for server-side enforcement.
 
-**With Firebase sync on:** `firestore.rules` requires every request to be
-signed in (even anonymously) before touching any data, which blocks random
-internet traffic from reaching your database. It does **not** stop someone
-who has the app installed from opening devtools and calling the Firestore
-SDK directly to bypass a role check — closing that gap needs giving every
-operator/technician/supervisor/admin a real Firebase Auth account (instead
-of the shared anonymous session) and rules keyed off `request.auth.uid`,
-which in turn needs a small backend (e.g. a Cloud Function) to issue those
-accounts safely. That's a reasonable next step for a larger rollout, but
-out of scope for the free, no-code-backend setup this project ships with —
-for a single factory's trusted team, the app-level checks plus "you must
-have the app to reach the database at all" is a sensible trade-off.
+**With Firebase on (real email/password accounts):** this is real
+server-side enforcement. `firestore.rules` checks the signed-in user's
+actual role and machine assignment (via `/users/{uid}` and
+`/meta/assignments`, looked up server-side by their Firebase Auth UID) —
+not just "is someone signed in". An operator's account literally cannot
+write a downtime record for a machine that isn't assigned to them, an
+Admin-only write is rejected by Firestore itself for anyone else, and
+nobody can create their own account (`allow write: if isAdmin()` on
+`/users/{userId}`) — account creation only happens through the Admin
+Panel's "Add User" flow (or the one-time manual bootstrap in Step 7 above).
+Passwords are never stored in Firestore; Firebase Authentication handles
+those. Keep passwords reasonably strong and don't share the Admin account.
 
 ## 8. Database structure
 
 Collections/records (same shape whether you're reading them from
 `localStorage` or, once Section 6 is set up, from Firestore):
 
-- **users**: `id, name, pin, role, shift, active`
+- **users**: `id, name, role, shift, active` — plus `pin` in local mode, or `email` in Firebase mode (passwords are never stored here; Firebase Authentication handles those)
 - **machines**: `id, model, order, status, activeRecordId`
 - **meta/assignments** (single doc): `{ [shift]: { [machineId]: operatorId } }`
 - **meta/categories** (single doc): `{ list: [{ id, label, icon, items[] }] }`
@@ -243,8 +274,10 @@ Collections/records (same shape whether you're reading them from
 
 Log in as `ADMIN1` / `0000` → **More → Admin Panel**:
 
-- **Users tab**: add an operator/technician/supervisor/admin with an ID, name,
-  PIN, role and shift. Disable (don't delete) users who leave.
+- **Users tab**: add an operator/technician/supervisor/admin. Without
+  Firebase configured, this is an ID/PIN. With Firebase configured (Section 6),
+  this creates a real login (email/password) — no separate Firebase Console
+  step needed.
 - **Machines tab**: add a machine ID, model, and current order.
 - **Assignments tab**: pick a shift, then assign an operator to each machine
   for that shift. This is the record `db.js` checks before letting an

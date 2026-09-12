@@ -24,7 +24,7 @@
         </div>
         <select id="ml-operator">
           <option value="">All Operators</option>
-          ${operators.map(o => `<option value="${o.id}">${ui.escapeHtml(o.name)} (${o.id})</option>`).join('')}
+          ${operators.map(o => `<option value="${o.id}">${ui.escapeHtml(o.name)} (${ui.escapeHtml(o.email || o.id)})</option>`).join('')}
         </select>
       </div>
       <div class="section-title" id="ml-count"></div>

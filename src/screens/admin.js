@@ -36,12 +36,18 @@
 
     function drawUsers(body) {
       const users = db.listUsers();
+      const firebaseOn = global.KDM_SYNC && global.KDM_SYNC.enabled;
       body.innerHTML = `
         <div class="card stack" style="margin-bottom:16px;">
           <div class="section-title" style="margin:0;">Add User</div>
-          <input id="u-id" placeholder="User ID (e.g. OP104)" />
           <input id="u-name" placeholder="Full name" />
-          <input id="u-pin" placeholder="PIN (numbers)" inputmode="numeric" />
+          ${firebaseOn ? `
+            <input id="u-email" type="email" placeholder="Email (used to log in)" />
+            <input id="u-password" type="text" placeholder="Password (min 6 characters)" />
+          ` : `
+            <input id="u-id" placeholder="User ID (e.g. OP104)" />
+            <input id="u-pin" placeholder="PIN (numbers)" inputmode="numeric" />
+          `}
           <select id="u-role">
             <option value="OPERATOR">Operator</option>
             <option value="TECHNICIAN">Technician</option>
@@ -54,17 +60,26 @@
         <div class="stack" id="user-list"></div>
       `;
       document.getElementById('add-user').addEventListener('click', () => {
-        const id = document.getElementById('u-id').value.trim();
         const name = document.getElementById('u-name').value.trim();
-        const pin = document.getElementById('u-pin').value.trim();
         const role = document.getElementById('u-role').value;
         const shift = document.getElementById('u-shift').value;
-        if (!id || !name || !pin) { ui.toast('Fill in ID, name and PIN.'); return; }
-        try {
-          db.addUser(user, { id, name, pin, role, shift });
-          ui.toast('User added.');
-          draw();
-        } catch (e) { ui.toast(ui.friendlyError(e)); }
+        const btn = document.getElementById('add-user');
+        let payload;
+        if (firebaseOn) {
+          const email = document.getElementById('u-email').value.trim();
+          const password = document.getElementById('u-password').value.trim();
+          if (!name || !email || !password) { ui.toast('Fill in name, email and password.'); return; }
+          payload = { name, email, password, role, shift };
+        } else {
+          const id = document.getElementById('u-id').value.trim();
+          const pin = document.getElementById('u-pin').value.trim();
+          if (!id || !name || !pin) { ui.toast('Fill in ID, name and PIN.'); return; }
+          payload = { id, name, pin, role, shift };
+        }
+        btn.disabled = true;
+        db.addUser(user, payload)
+          .then(() => { ui.toast('User added.'); draw(); })
+          .catch((e) => { ui.toast(ui.friendlyError(e)); btn.disabled = false; });
       });
       const list = document.getElementById('user-list');
       users.forEach(u => {
@@ -74,7 +89,7 @@
           <div class="row">
             <div class="grow">
               <b>${ui.escapeHtml(u.name)}</b> <span class="badge">${u.role}</span> ${u.active === false ? '<span class="badge" style="background:#fdecec;color:#dc2626;">disabled</span>' : ''}
-              <div class="muted small">${u.id} · ${ui.escapeHtml(u.shift || '')}</div>
+              <div class="muted small">${ui.escapeHtml(u.email || u.id)} · ${ui.escapeHtml(u.shift || '')}</div>
             </div>
             <button class="btn btn-outline toggle-active" style="width:auto; min-height:40px; font-size:13px;">${u.active === false ? 'Enable' : 'Disable'}</button>
           </div>
@@ -143,7 +158,7 @@
             <div class="grow"><b>${ui.escapeHtml(m.id)}</b></div>
             <select class="grow assign-select" data-machine="${m.id}">
               <option value="">— Unassigned —</option>
-              ${operators.map(o => `<option value="${o.id}" ${o.id === current ? 'selected' : ''}>${ui.escapeHtml(o.name)} (${o.id})</option>`).join('')}
+              ${operators.map(o => `<option value="${o.id}" ${o.id === current ? 'selected' : ''}>${ui.escapeHtml(o.name)} (${ui.escapeHtml(o.email || o.id)})</option>`).join('')}
             </select>
           `;
           row.querySelector('.assign-select').addEventListener('change', (e) => {

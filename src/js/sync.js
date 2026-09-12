@@ -1,15 +1,15 @@
 /**
- * sync.js — optional real-time multi-device layer.
+ * sync.js — optional real-time multi-device layer + real login.
  *
- * If src/js/firebase-config.js has a real Firebase project config, this
- * file signs in anonymously (just so Firestore's security rules see a
- * signed-in request) and exposes push/subscribe helpers. db.js calls these
- * after every local write, and re-applies whatever comes back from other
- * devices to its own localStorage mirror, then fires 'kdm:data-changed' so
- * the currently open screen can refresh.
+ * If src/js/firebase-config.js has a real Firebase project config:
+ *  - Firebase Authentication (Email/Password) becomes the login system.
+ *    Nobody can open the app and use it without an account an Admin
+ *    created for them — there is no "anonymous" access anymore.
+ *  - Firestore gives every device the same live data (db.js calls the
+ *    push/subscribe helpers below after every write).
  *
- * If no config is set, KDM_SYNC.enabled is false and nothing here runs —
- * the app behaves exactly like the original single-device build.
+ * If no config is set, KDM_SYNC.enabled is false and the app falls back
+ * to the original single-device ID+PIN login stored in localStorage.
  */
 (function (global) {
   const cfg = global.KDM_FIREBASE_CONFIG;
@@ -17,7 +17,7 @@
 
   const sync = {
     enabled: false,
-    ready: Promise.resolve(false)
+    authReady: Promise.resolve(null) // resolves with the Firebase user (or null) once the initial session check is done
   };
 
   if (looksConfigured && global.firebase) {
@@ -34,10 +34,40 @@
 
       sync.enabled = true;
       sync.db = db;
-      sync.ready = new Promise((resolve) => {
-        auth.signInAnonymously().catch((e) => console.error('[sync] anonymous sign-in failed', e));
-        auth.onAuthStateChanged((user) => resolve(!!user));
+      sync.auth = auth;
+
+      let resolveAuthReady;
+      sync.authReady = new Promise((resolve) => { resolveAuthReady = resolve; });
+      let firstAuthEvent = true;
+      auth.onAuthStateChanged((user) => {
+        if (firstAuthEvent) { firstAuthEvent = false; resolveAuthReady(user); }
+        sync._onAuthChangeCb && sync._onAuthChangeCb(user);
       });
+
+      sync.onAuthChange = function (cb) { sync._onAuthChangeCb = cb; };
+
+      sync.signIn = function (email, password) {
+        return auth.signInWithEmailAndPassword(email, password);
+      };
+      sync.signOut = function () { return auth.signOut(); };
+
+      // Creates a brand-new login (email+password) WITHOUT logging out
+      // whoever is currently signed in (the Admin doing the adding). This
+      // uses a short-lived secondary Firebase app instance — a supported
+      // client-side pattern, no backend/Cloud Function required.
+      sync.createUserKeepingCurrentSession = function (email, password) {
+        const secondaryApp = firebase.initializeApp(cfg, 'secondary-' + Date.now());
+        return secondaryApp.auth().createUserWithEmailAndPassword(email, password)
+          .then((cred) => {
+            const uid = cred.user.uid;
+            return secondaryApp.auth().signOut().then(() => secondaryApp.delete()).then(() => uid);
+          })
+          .catch((e) => secondaryApp.delete().finally(() => { throw e; }));
+      };
+
+      sync.getDocOnce = function (path) {
+        return db.doc(path).get().then((snap) => (snap.exists ? snap.data() : null));
+      };
 
       sync.push = function (collection, id, data) {
         if (!sync.enabled) return Promise.resolve();
@@ -54,7 +84,7 @@
       sync.subscribeCollection = function (collection, cb) {
         if (!sync.enabled) return () => {};
         return db.collection(collection).onSnapshot(
-          (snap) => cb(snap.docs.map((d) => d.data())),
+          (snap) => cb(snap.docs.map((d) => Object.assign({ id: d.id }, d.data()))),
           (e) => console.error(`[sync] subscribe failed (${collection})`, e)
         );
       };

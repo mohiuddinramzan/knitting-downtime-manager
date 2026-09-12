@@ -8,7 +8,7 @@
     root.innerHTML = `
       <div class="card" style="margin-bottom:16px;">
         <div class="v" style="font-size:19px;">${ui.escapeHtml(user.name)}</div>
-        <div class="muted">${user.id} · ${user.role} · ${ui.escapeHtml(user.shift || '')}</div>
+        <div class="muted">${ui.escapeHtml(user.email || user.id)} · ${user.role} · ${ui.escapeHtml(user.shift || '')}</div>
       </div>
       <div class="stack">
         ${['ADMIN', 'SUPERVISOR'].includes(user.role) ? `<button class="btn btn-outline" id="go-audit">📜 Audit Log</button>` : ''}
@@ -27,7 +27,7 @@
         title: 'Log out?',
         confirmLabel: 'YES, LOG OUT',
         confirmClass: 'btn-red',
-        onConfirm: () => { db.logout(); ctx.navigate('#/login'); }
+        onConfirm: () => { db.logout().then(() => ctx.navigate('#/login')); }
       });
     });
   }
