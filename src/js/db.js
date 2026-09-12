@@ -131,15 +131,17 @@
   // local copy (harmless even if two devices race — doc IDs are the
   // machine/user/record ID, so a duplicate seed just overwrites itself).
   function initRemoteSync() {
-    let seededUsers = false, seededMachines = false, seededAssignments = false, seededCategories = false;
+    let seededMachines = false, seededAssignments = false, seededCategories = false;
 
+    // NOTE: 'users' is intentionally NOT auto-seeded here. In Firebase mode,
+    // user documents must be keyed by the person's real Firebase Auth UID
+    // (created via the Admin Panel, or the one-time manual bootstrap in
+    // README Section 6, Step 7) — seeding it with the local ID+PIN demo
+    // users (ADMIN1, OP101, ...) would just create documents nobody can
+    // ever log into, since no Firebase Auth account has those UIDs.
     sync.subscribeCollection('users', (docs) => {
-      if (docs.length === 0 && !seededUsers) {
-        seededUsers = true;
-        listUsers().forEach(u => sync.push('users', u.id, u));
-        return;
-      }
-      if (docs.length) { write(LS_KEYS.users, docs); dispatchRemoteChange(); }
+      write(LS_KEYS.users, docs);
+      dispatchRemoteChange();
     });
 
     sync.subscribeCollection('machines', (docs) => {
