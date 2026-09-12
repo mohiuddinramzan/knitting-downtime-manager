@@ -109,6 +109,16 @@
           write(LS_KEYS.session, _currentUserCache);
           _resolveAuthOnce();
           dispatchRemoteChange();
+        }).catch((e) => {
+          // A Firestore error here (e.g. permission-denied because the
+          // rules or the /users/{uid} profile doc aren't set up correctly
+          // yet) must never leave the app stuck on the loading screen.
+          console.error('[db] could not load profile for signed-in user', e);
+          _currentUserCache = null;
+          write(LS_KEYS.session, null);
+          sync.signOut();
+          _resolveAuthOnce();
+          dispatchRemoteChange();
         });
       });
     } else {
@@ -198,23 +208,39 @@
   function login(idOrEmail, pinOrPassword) {
     if (sync.enabled) {
       return sync.signIn(idOrEmail, pinOrPassword)
-        .then((cred) => sync.getDocOnce('users/' + cred.user.uid).then((profile) => {
-          if (!profile || profile.active === false) {
-            return sync.signOut().then(() => {
-              throw new AuthError('disabled', 'This account is disabled. Contact Admin.');
-            });
-          }
-          const user = Object.assign({ id: cred.user.uid, email: idOrEmail }, profile);
-          _currentUserCache = user;
-          write(LS_KEYS.session, user);
-          logAudit(user, null, 'LOGIN', '');
-          return user;
-        }))
         .catch((e) => {
-          if (e && e.name === 'AuthError') throw e;
+          // A genuine Firebase Authentication failure - wrong email/password,
+          // or the account doesn't exist.
           logAudit(null, null, 'LOGIN_FAILED', idOrEmail);
           throw new AuthError('bad_credentials', 'Invalid email or password.');
-        });
+        })
+        .then((cred) => sync.getDocOnce('users/' + cred.user.uid)
+          .then((profile) => {
+            if (!profile || profile.active === false) {
+              return sync.signOut().then(() => {
+                throw new AuthError('disabled', 'This account is disabled or has no profile set up. Contact Admin.');
+              });
+            }
+            const user = Object.assign({ id: cred.user.uid, email: idOrEmail }, profile);
+            _currentUserCache = user;
+            write(LS_KEYS.session, user);
+            logAudit(user, null, 'LOGIN', '');
+            return user;
+          })
+          .catch((e) => {
+            if (e && e.name === 'AuthError') throw e;
+            // Login to Firebase SUCCEEDED here - this is a different problem:
+            // Firestore rejected reading the user's profile document. Usually
+            // means the Firestore rules aren't published yet, or the
+            // /users/{uid} document is missing/misconfigured (see README
+            // Section 6, Step 7). Say so plainly instead of blaming the password.
+            console.error('[login] signed in to Firebase but could not load Firestore profile', e);
+            sync.signOut();
+            throw new AuthError(
+              'profile_load_failed',
+              'Signed in, but your profile could not be loaded. Ask Admin to check Firestore rules and your user profile document (README Section 6, Step 7).'
+            );
+          }));
     }
     // ---- local ID+PIN mode (single device, no Firebase configured) ----
     try {
